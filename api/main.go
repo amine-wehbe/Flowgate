@@ -32,7 +32,7 @@ func main() {
 	// Read DB URL from env so Docker can inject the container hostname
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://amine:password123@localhost:5432/db"
+		log.Fatal("DATABASE_URL is not set")
 	}
 	pool, err := connectDB(context.Background(), dbURL)
 	if err != nil {

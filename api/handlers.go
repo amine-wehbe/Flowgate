@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,7 +76,8 @@ func postRequests(pool *pgxpool.Pool, hub *Hub) http.HandlerFunc {
 			http.Error(w, "DB error:", http.StatusBadRequest)
 			return
 		}
-		_, err = pool.Exec(r.Context(), "INSERT INTO requests (method, url, host, path, protocol, req_headers, req_body, res_status, res_headers, res_body, duration_ms, tls) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", req.Method, req.URL, req.Host, req.Path, req.Protocol, req.ReqHeaders, req.ReqBody, req.ResStatus, req.ResHeaders, req.ResBody, req.DurationMs, req.TLS)
+		// RETURNING fills in the DB-generated id and timestamp so live WebSocket items can be replayed immediately
+		err = pool.QueryRow(r.Context(), "INSERT INTO requests (method, url, host, path, protocol, req_headers, req_body, res_status, res_headers, res_body, duration_ms, tls) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id, captured_at", req.Method, req.URL, req.Host, req.Path, req.Protocol, req.ReqHeaders, req.ReqBody, req.ResStatus, req.ResHeaders, req.ResBody, req.DurationMs, req.TLS).Scan(&req.ID, &req.CapturedAt)
 		if err != nil {
 			http.Error(w, "DB insertion error:", http.StatusInternalServerError)
 			return
@@ -113,7 +115,8 @@ func replayRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, "DB row scan error:", http.StatusInternalServerError)
 			return
 		}
-		request, err := http.NewRequest(req.Method, req.URL, nil)
+		// Re-send the original body too, otherwise POST/PUT replays go out empty
+		request, err := http.NewRequest(req.Method, req.URL, strings.NewReader(req.ReqBody))
 		if err != nil {
 			http.Error(w, "HTTP request error:", http.StatusInternalServerError)
 			return

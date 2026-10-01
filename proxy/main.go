@@ -9,12 +9,12 @@ func main() {
 	// Load CA cert+key from mkcert's local store — used to sign per-domain TLS certs at runtime
 	c, err := loadCA()
 	if err != nil {
-		log.Fatal("Error loading certificate")
+		log.Fatal("Error loading CA certificate: ", err)
 	}
 	// Parse raw cert bytes into x509 struct needed by generateCert
 	cert, err := parseCA(c)
 	if err != nil {
-		log.Fatal("Error parsing certificate")
+		log.Fatal("Error parsing CA certificate: ", err)
 	}
 
 	log.Println("Flowgate proxy listening on :8080")

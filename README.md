@@ -2,6 +2,8 @@
 
 A self-hosted HTTP/HTTPS intercepting proxy with a live inspection UI. Inspired by Burp Suite/Charles Proxy, built from scratch.
 
+![Flowgate capturing HTTPS traffic](docs/screenshots/1-overview.png)
+
 ## Stack
 
 - **Proxy** — Go, handles HTTP and HTTPS (TLS MITM via local CA)
@@ -25,6 +27,7 @@ A self-hosted HTTP/HTTPS intercepting proxy with a live inspection UI. Inspired 
 ```bash
 git clone https://github.com/amine-wehbe/flowgate
 cd flowgate
+cp .env.example .env   # then fill in your DB credentials and MKCERT_CAROOT
 docker-compose up --build
 ```
 
@@ -42,16 +45,15 @@ To capture browser traffic, set your system proxy to `localhost:8080` for both H
 
 Remember to disable the proxy when done!! As to not log all of your traffic.
 
-## Configure mkcert Volume
+## Configure mkcert
 
-The proxy container needs access to your mkcert CA to do TLS MITM. Update the volume path in `docker-compose.yml` to match your machine:
+The proxy signs a certificate for each intercepted host using your mkcert root CA. Point `MKCERT_CAROOT` in `.env` at your mkcert directory:
 
-```yaml
-volumes:
-  - /path/to/your/mkcert:/certs:ro
+```bash
+mkcert -CAROOT   # prints the path to put in .env
 ```
 
-Find your mkcert path with: `mkcert -CAROOT`
+Docker Compose mounts that directory read-only into the proxy container. The proxy refuses to start if `MKCERT_CAROOT` is not set.
 
 ## Reset Database
 
@@ -66,10 +68,10 @@ docker-compose down -v && docker-compose up
 docker-compose up db
 
 # Terminal 2 — API
-cd api && go run main.go db.go models.go handlers.go hub.go
+cd api && DATABASE_URL=postgres://user:pass@localhost:5432/db go run .
 
 # Terminal 3 — Proxy
-cd proxy && go run main.go proxy.go tls.go sender.go
+cd proxy && MKCERT_CAROOT="$(mkcert -CAROOT)" go run .
 
 # Terminal 4 — Frontend
 cd frontend && npm run dev

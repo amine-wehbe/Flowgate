@@ -23,6 +23,8 @@ func handleRequest(w http.ResponseWriter, r *http.Request, caCert *x509.Certific
 
 	// Remove gzip encoding so response body arrives as plain text
 	r.Header.Del("Accept-Encoding")
+	// Buffer the request body — forwarding consumes it, but sendToAPI needs it too
+	reqBody := readBody(r)
 	start := time.Now()
 	// Forward request to real destination and get response
 	res, err := http.DefaultTransport.RoundTrip(r)
@@ -43,12 +45,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request, caCert *x509.Certific
 	}
 	w.WriteHeader(res.StatusCode)
 	w.Write(resBody)
+	r.Body = io.NopCloser(bytes.NewReader(reqBody))
 	sendToAPI(r, res, duration, false)
 }
 
 // Handles HTTPS CONNECT — performs TLS MITM: decrypts browser traffic, reads it, re-encrypts to real server
 func handleTunnel(w http.ResponseWriter, r *http.Request, caCert *x509.Certificate, caKey crypto.PrivateKey) {
-	start := time.Now()
 	// Open raw TCP connection to destination (e.g. example.com:443)
 	conn, err := net.Dial("tcp", r.URL.Host)
 	if err != nil {
@@ -101,38 +103,64 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, caCert *x509.Certifica
 		return
 	}
 
-	// Parse the decrypted HTTP request sent by the browser through the TLS tunnel
-	req, err := http.ReadRequest(bufio.NewReader(tlsBrowser))
-	if err != nil {
-		log.Println("Error reading request from client: ", err)
-		return
+	// Browsers reuse one TLS connection for many requests (keep-alive), so keep reading until it closes
+	browserReader := bufio.NewReader(tlsBrowser)
+	serverReader := bufio.NewReader(tlsServer)
+	for {
+		start := time.Now()
+		// Parse the decrypted HTTP request sent by the browser through the TLS tunnel
+		req, err := http.ReadRequest(browserReader)
+		if err != nil {
+			if err != io.EOF {
+				log.Println("Error reading request from client: ", err)
+			}
+			return
+		}
+		// Reconstruct full URL — inside a tunnel the browser only sends the path, not the full URL
+		log.Println(req.Method, "https://"+r.URL.Hostname()+req.URL.String())
+		req.Header.Del("Accept-Encoding")
+		// Buffer the request body — writing to the server consumes it, but sendToAPI needs it too
+		reqBody := readBody(req)
+		// Forward the request to the real server through our TLS client connection
+		if err = req.Write(tlsServer); err != nil {
+			log.Println("Error writing to server: ", err)
+			return
+		}
+		// Read the real server's response
+		res, err := http.ReadResponse(serverReader, req)
+		if err != nil {
+			log.Println("Error reading response from server: ", err)
+			return
+		}
+		// Read body once — needed by both the browser response and sendToAPI
+		resBody, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		res.Body = io.NopCloser(bytes.NewReader(resBody))
+		// Send the response back to the browser
+		if err = res.Write(tlsBrowser); err != nil {
+			log.Println("Error writing back to client: ", err)
+			return
+		}
+		// Reconstruct full HTTPS URL before sending to API — tunnel only gives us the path
+		req.URL.Host = r.URL.Hostname()
+		req.URL.Scheme = "https"
+		req.Body = io.NopCloser(bytes.NewReader(reqBody))
+		res.Body = io.NopCloser(bytes.NewReader(resBody))
+		sendToAPI(req, res, time.Since(start), true)
+		// Stop if either side asked to close the connection
+		if req.Close || res.Close {
+			return
+		}
 	}
-	// Reconstruct full URL — inside a tunnel the browser only sends the path, not the full URL
-	log.Println(req.Method, "https://"+r.URL.Hostname()+req.URL.String())
-	// Forward the request to the real server through our TLS client connection
-	err = req.Write(tlsServer)
-	if err != nil {
-		log.Println("Error writing to server: ", err)
-		return
+}
+
+// Reads the full request body and puts a fresh copy back so the request can still be forwarded
+func readBody(r *http.Request) []byte {
+	if r.Body == nil {
+		return nil
 	}
-	// Read the real server's response
-	res, err := http.ReadResponse(bufio.NewReader(tlsServer), req)
-	if err != nil {
-		log.Println("Error reading response from server: ", err)
-		return
-	}
-	defer res.Body.Close()
-	// Read body once — needed by both the browser response and sendToAPI
-	resBody, _ := io.ReadAll(res.Body)
-	res.Body = io.NopCloser(bytes.NewReader(resBody))
-	// Send the response back to the browser
-	if err = res.Write(tlsBrowser); err != nil {
-		log.Println("Error writing back to client: ", err)
-		return
-	}
-	// Reconstruct full HTTPS URL before sending to API — tunnel only gives us the path
-	req.URL.Host = r.URL.Hostname()
-	req.URL.Scheme = "https"
-	res.Body = io.NopCloser(bytes.NewReader(resBody))
-	sendToAPI(req, res, time.Since(start), true)
+	b, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(b))
+	return b
 }
